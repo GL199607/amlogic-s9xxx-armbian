@@ -265,6 +265,7 @@ on:
           - zcube1-max
           - zk-r39a
           - zysj
+          - zysj-2288a
       armbian_kernel:
         description: "Select kernel version."
         required: false
@@ -471,7 +472,7 @@ jobs:
           gh_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Rebuild Armbian for target boards
-        uses: ophub/amlogic-s9xxx-armbian@main
+        uses: GL199607/amlogic-s9xxx-armbian@main
         if: ${{ steps.clean.outputs.status == 'success' && !cancelled() }}
         with:
           build_target: armbian
