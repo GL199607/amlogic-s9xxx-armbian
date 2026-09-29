@@ -266,6 +266,7 @@ on:
           - zk-r39a
           - zysj
           - zysj-2288a
+          - zysj-2288b
       armbian_kernel:
         description: "Select kernel version."
         required: false
