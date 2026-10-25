@@ -419,13 +419,14 @@ jobs:
           armbian_buildpath="build/output/images"
           [[ -d "${armbian_buildpath}" ]] || mkdir -p "${armbian_buildpath}"
           ln -sf /builder/build ${{ github.workspace }}/build
-          ln -sf /builder/build /home/runner/work/_actions/ophub/amlogic-s9xxx-armbian/main/build
+          mkdir -p /home/runner/work/_actions/GL199607/amlogic-s9xxx-armbian/main
+          ln -sf /builder/build /home/runner/work/_actions/GL199607/amlogic-s9xxx-armbian/main/build 2>/dev/null || true
 
           # Query the latest release asset via GitHub API
           latest_version=$(curl -s \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              https://api.github.com/repos/${{ github.repository }}/releases?per_page=20 | \
+              https://api.github.com/repos/ophub/amlogic-s9xxx-armbian/releases?per_page=20 | \
               jq -r --arg RTK "Armbian_${{ matrix.release }}_arm64_" \
               --arg BOARD "-trunk_" \
               '[.[] | select(.tag_name | contains($RTK))] |
