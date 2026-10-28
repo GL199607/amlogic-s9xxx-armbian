@@ -11,49 +11,42 @@ jobs:
         run: |
           set -e
           curl -sSL --retry 5 --retry-all-errors -o image.img.gz "${{ inputs.image_url }}"
-          ls -l image.img.gz; sha256sum image.img.gz
+          echo "gz: $(stat -c%s image.img.gz) bytes"; sha256sum image.img.gz
           gunzip -k image.img.gz
-          IMG=image.img; ls -l $IMG; echo "IMG=$IMG" >> $GITHUB_ENV
+          echo "img: $(stat -c%s image.img) bytes"
       - name: Bootloader segments
         run: |
-          IMG=${{ env.IMG }}
-          echo "=== 0x8000 (idbloader, 期望 LDR/RKNS 头) ===";   dd if=$IMG bs=1 skip=32768  count=16 2>/dev/null | xxd
-          echo "=== 0xC00000 (trust LBA0x6000, 期望 BL3X) ===";  dd if=$IMG bs=1 skip=12582912 count=16 2>/dev/null | xxd
-          echo "=== 0x800000 (uboot, 期望 LOADER) ===";          dd if=$IMG bs=1 skip=8388608 count=16 2>/dev/null | xxd
-          echo "=== 与 fork 里三件逐字节比对 ==="
-          for seg in "32768:idbloader" "12582912:trust" "8388608:uboot"; do
-            OFF=${seg%%:*}; NAME=${seg##*:}
-            case $NAME in
-              idbloader) LEN=204800; SUM=6013b059b3197bb4a9f5049dc3e392dc ;;
-              trust)     LEN=4194304; SUM=c9d0522d1fc33f366da6900d4a295a6a ;;
-              uboot)     LEN=4194304; SUM=6af7e2db2b1bc596a79276cb6233c5d3 ;;
-            esac
-            GOT=$(dd if=$IMG bs=1 skip=$OFF count=$LEN 2>/dev/null | sha256sum >/dev/null; dd if=$IMG bs=1 skip=$OFF count=$LEN 2>/dev/null | md5sum | awk '{print $1}')
-            echo "  $NAME @ $OFF: md5=$GOT 期望=$SUM $([ "$GOT" = "$SUM" ] && echo OK || echo MISMATCH)"
-          done
+          set -e
+          IMG=image.img
+          seg() { dd if=$IMG bs=1M iflag=skip_bytes,count_bytes skip=$1 count=$2 2>/dev/null; }
+          echo "=== 0x8000 idbloader 头 ==="; seg 32768 16 | xxd
+          echo "=== 0xC00000 trust 头 ===";    seg 12582912 16 | xxd
+          echo "=== 0x800000 uboot 头 ===";    seg 8388608 16 | xxd
+          echo "=== 逐字节 md5 比对 ==="
+          check() { GOT=$(seg $2 $3 | md5sum | awk '{print $1}'); [ "$GOT" = "$4" ] && R=OK || R=MISMATCH; echo "  $1: got=$GOT want=$4 -> $R"; }
+          check idbloader 32768   204800  6013b059b3197bb4a9f5049dc3e392dc
+          check trust     12582912 4194304 c9d0522d1fc33f366da6900d4a295a6a
+          check uboot     8388608  4194304 6af7e2db2b1bc596a79276cb6233c5d3
       - name: Mount and inspect
         run: |
           set -x
-          IMG=${{ env.IMG }}
+          IMG=image.img
           sudo losetup -Pf --show "$IMG"
           lsblk -o NAME,SIZE,LABEL,FSTYPE
           BOOT=$(lsblk -lno PATH,LABEL | awk '$2=="boot"{print $1}' | head -1)
           ROOT=$(lsblk -lno PATH,LABEL | awk '$2=="rootfs"{print $1}' | head -1)
-          [ -n "$BOOT" ] || BOOT=$(lsblk -lno PATH,PARTLABEL | awk '$2=="boot"{print $1}' | head -1)
-          [ -n "$ROOT" ] || ROOT=$(lsblk -lno PATH,PARTLABEL | awk '$2=="rootfs"{print $1}' | head -1)
           echo "BOOT=$BOOT ROOT=$ROOT"
           sudo mkdir -p /mnt/b /mnt/r
           [ -n "$BOOT" ] && sudo mount -o ro "$BOOT" /mnt/b
           echo "=== boot 分区 ==="; ls /mnt/b | head -20
-          echo "=== iotbox dtb ==="; ls /mnt/b/dtb/rockchip/ 2>/dev/null | grep -i iotbox || echo NO_IOTBOX_DTB
-          echo "=== dtb md5（期望 49c71e1bdd1bb87a923d686b196080f8）==="
+          echo "=== iotbox dtb 是否存在 ==="; ls /mnt/b/dtb/rockchip/ 2>/dev/null | grep -i iotbox || echo NO_IOTBOX_DTB
+          echo "=== dtb md5 期望 49c71e1bdd1bb87a923d686b196080f8 ==="
           md5sum /mnt/b/dtb/rockchip/rk3399-iotbox3399m.dtb 2>/dev/null || echo DTB_NOT_FOUND
           echo "=== boot.scr load_addr ==="; strings /mnt/b/boot.scr 2>/dev/null | grep -E "load_addr" | head -3
-          echo "=== armbianEnv ==="; grep -E "fdtfile|rootdev|verbosity" /mnt/b/armbianEnv.txt 2>/dev/null
+          echo "=== armbianEnv ==="; grep -E "fdtfile|rootdev" /mnt/b/armbianEnv.txt 2>/dev/null || true
           [ -n "$ROOT" ] && sudo mount -o ro "$ROOT" /mnt/r
           echo "=== 内核版本目录 ==="; ls /mnt/r/lib/modules/ 2>/dev/null
-          echo "=== ★ RT5651 模块 ==="; find /mnt/r/lib/modules -name "*rt5651*" 2>/dev/null | head
-          echo "=== ★ modules.alias realtek,rt5651 ==="; grep -h "realtek,rt5651" /mnt/r/lib/modules/*/modules.alias 2>/dev/null | head -4
-          echo "=== RT5651 内建? ==="; grep -i rt5651 /mnt/r/lib/modules/*/modules.builtin 2>/dev/null | head -3
+          echo "=== ★RT5651 模块 ==="; find /mnt/r/lib/modules -name "*rt5651*" 2>/dev/null | head
+          echo "=== ★modules.alias realtek,rt5651 ==="; grep -h "realtek,rt5651" /mnt/r/lib/modules/*/modules.alias 2>/dev/null | head -4
+          echo "=== RT5651 是否内建 ==="; grep -i rt5651 /mnt/r/lib/modules/*/modules.builtin 2>/dev/null | head -3
           echo "=== 对照 rt5645 ==="; find /mnt/r/lib/modules -name "snd-soc-rt5645.ko*" 2>/dev/null | head -2
-          echo "=== 板卡 dtb 在 rootfs 里的副本? ==="; find /mnt/r/boot /mnt/r/lib/modules -name "*iotbox*" 2>/dev/null | head -5
