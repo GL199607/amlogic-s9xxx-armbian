@@ -17,82 +17,49 @@ jobs:
       - name: Bootloader segments
         run: |
           set -e
-          IMG=image.img
-          seg() { dd if=$IMG bs=1M iflag=skip_bytes,count_bytes skip=$1 count=$2 2>/dev/null; }
-          echo "IDB_HEAD=$(seg 32768 8 | xxd -p)"
-          echo "TRUST_HEAD=$(seg 12582912 4 | xxd -p)"
-          echo "UBOOT_HEAD=$(seg 8388608 8 | xxd -p)"
-          check() { GOT=$(seg $2 $3 | md5sum | awk '{print $1}'); [ "$GOT" = "$4" ] && R=OK || R=MISMATCH; echo "SEG_$1=$R got=$GOT"; }
+          seg() { dd if=image.img bs=1M iflag=skip_bytes,count_bytes skip=$1 count=$2 2>/dev/null; }
+          check() { GOT=$(seg $2 $3 | md5sum | awk '{print $1}'); [ "$GOT" = "$4" ] && R=OK || R=MISMATCH; echo "SEG_$1=$R got=$GOT want=$4"; }
           check IDBLOADER 32768   204800  6013b059b3197bb4a9f5049dc3e392dc
           check TRUST     12582912 4194304 c9d0522d1fc33f366da6900d4a295a6a
           check UBOOT     8388608  4194304 6af7e2db2b1bc596a79276cb6233c5d3
-      - name: Parse GPT manually and mount by offset
+      - name: Parse GPT and mount by offset (per-index dirs)
         run: |
           set -e
-          python3 - <<'PY' > parts.txt
-          import struct, json
-          f=open('image.img','rb')
-          f.seek(512); h=f.read(92)
-          assert h[:8]==b'EFI PART', "no GPT"
-          plba=struct.unpack('<Q',h[72:80])[0]
-          n=struct.unpack('<I',h[80:84])[0]
-          psz=struct.unpack('<I',h[84:88])[0]
+          python3 - > mounts.txt <<'PY'
+          import struct
+          f=open('image.img','rb'); f.seek(512); h=f.read(92)
+          assert h[:8]==b'EFI PART'
+          plba=struct.unpack('<Q',h[72:80])[0]; n=struct.unpack('<I',h[80:84])[0]; psz=struct.unpack('<I',h[84:88])[0]
           f.seek(plba*512)
-          out=[]
           for i in range(n):
               e=f.read(psz)
-              if len(e)<128: break
-              if e[0:16].strip(b'\x00'):
-                  st=struct.unpack('<Q',e[32:40])[0]
-                  en=struct.unpack('<Q',e[40:48])[0]
-                  nm=e[56:128].decode('utf-16-le','replace').rstrip('\x00')
-                  out.append({'idx':i+1,'name':nm,'start_lba':st,'end_lba':en,'bytes':(en-st+1)*512})
-          print(json.dumps(out))
-          PY
-          cat parts.txt
-          echo "--- 逐分区 dump 内容头 ---"
-          python3 - <<'PY'
-          import json,subprocess
-          ps=json.load(open('parts.txt'))
-          for p in ps:
-              off=p['start_lba']*512
-              r=subprocess.run(['dd','if=image.img','bs=1M','iflag=skip_bytes,count_bytes',
-                                'skip=%d'%off,'count=32'],capture_output=True)
-              d=r.stdout
-              print("part%d name=%r start=%d bytes=%d head_hex=%s" % (p['idx'],p['name'],off,p['bytes'],d[:8].hex()))
-              # 找 fstab / 特征文件判断哪个是 boot / rootfs
-              r2=subprocess.run(['dd','if=image.img','bs=1M','iflag=skip_bytes,count_bytes',
-                                 'skip=%d'%off,'count=200'],capture_output=True)
-          PY
-          echo "--- 用 offset 挂载 ---"
-          python3 - <<'PY' > mounts.txt
-          import json
-          ps=json.load(open('parts.txt'))
-          for p in ps:
-              off=p['start_lba']*512
-              print("%s %d %d" % (p['name'], off, p['bytes']))
+              if len(e)<128 or not e[0:16].strip(b'\x00'): continue
+              st=struct.unpack('<Q',e[32:40])[0]; en=struct.unpack('<Q',e[40:48])[0]
+              print("%d %d %d" % (i+1, st*512, (en-st+1)*512))
           PY
           cat mounts.txt
-          sudo mkdir -p /mnt/b /mnt/r
-          while read NAME OFF BYTES; do
-            if sudo mount -o ro,offset=$OFF "image.img" /mnt/probe_$NAME 2>/dev/null; then :; fi
-            sudo mkdir -p /mnt/probe_$NAME
-            if sudo mount -o ro,offset=$OFF "image.img" /mnt/probe_$NAME; then
-              echo "MOUNTED $NAME at offset $OFF"
-              ls /mnt/probe_$NAME | head -8
-              [ -d /mnt/probe_$NAME/dtb ] && sudo mount --bind /mnt/probe_$NAME /mnt/b
-              [ -d /mnt/probe_$NAME/lib/modules ] && sudo mount --bind /mnt/probe_$NAME /mnt/r
+          while read IDX OFF BYTES; do
+            MNT=/mnt/p$IDX
+            sudo mkdir -p "$MNT"
+            if sudo mount -o ro,offset=$OFF,sizelimit=$BYTES image.img "$MNT"; then
+              echo "=== MOUNTED p$IDX off=$OFF size=$BYTES ==="
+              ls "$MNT" | head -12
+              if [ -f "$MNT/armbianEnv.txt" ] || [ -d "$MNT/dtb" ]; then BOOTMNT="$MNT"; echo "BOOTMNT=$MNT"; fi
+              if [ -d "$MNT/lib/modules" ]; then ROOTMNT="$MNT"; echo "ROOTMNT=$MNT"; fi
             else
-              echo "MOUNT_FAIL $NAME offset=$OFF"
+              echo "MOUNT_FAIL p$IDX off=$OFF"
             fi
           done < mounts.txt
-          echo "=== boot: iotbox dtb ==="
-          ls /mnt/b/dtb/rockchip/ 2>/dev/null | grep -i iotbox || echo NO_IOTBOX_DTB
-          echo "=== dtb md5 期望 49c71e1bdd1bb87a923d686b196080f8 ==="
-          md5sum /mnt/b/dtb/rockchip/rk3399-iotbox3399m.dtb 2>/dev/null || echo DTB_NOT_FOUND
-          echo "=== boot.scr load_addr ==="; strings /mnt/b/boot.scr 2>/dev/null | grep -E "load_addr" | head -3
-          echo "=== armbianEnv ==="; grep -E "fdtfile|rootdev" /mnt/b/armbianEnv.txt 2>/dev/null || true
-          echo "=== lib/modules ==="; ls /mnt/r/lib/modules/ 2>/dev/null
-          echo "=== RT5651 ==="; find /mnt/r/lib/modules -name "*rt5651*" 2>/dev/null | head
-          echo "=== modules.alias ==="; grep -h "realtek,rt5651" /mnt/r/lib/modules/*/modules.alias 2>/dev/null | head -4
-          echo "=== rt5645 对照 ==="; find /mnt/r/lib/modules -name "snd-soc-rt5645.ko*" 2>/dev/null | head -2
+          echo "=== ★ boot: iotbox dtb ==="
+          find /mnt/p* -name "rk3399-iotbox3399m.dtb" 2>/dev/null | head
+          echo "=== ★ dtb md5 期望 49c71e1bdd1bb87a923d686b196080f8 ==="
+          find /mnt/p* -name "rk3399-iotbox3399m.dtb" -exec md5sum {} \; 2>/dev/null
+          echo "=== ★ boot.scr load_addr ==="
+          for f in $(find /mnt/p* -maxdepth 1 -name "boot.scr" 2>/dev/null); do echo "--- $f ---"; strings $f | grep -E "load_addr" | head -2; done
+          echo "=== armbianEnv fdtfile ==="
+          for f in $(find /mnt/p* -maxdepth 1 -name "armbianEnv.txt" 2>/dev/null); do grep -E "fdtfile|rootdev" $f; done
+          echo "=== ★ lib/modules ==="; ls /mnt/p*/lib/modules/ 2>/dev/null
+          echo "=== ★ RT5651 模块 ==="; find /mnt/p*/lib/modules -name "*rt5651*" 2>/dev/null
+          echo "=== ★ modules.alias realtek,rt5651 ==="; grep -h "realtek,rt5651" /mnt/p*/lib/modules/*/modules.alias 2>/dev/null | head -4
+          echo "=== RT5651 内建? ==="; grep -i rt5651 /mnt/p*/lib/modules/*/modules.builtin 2>/dev/null | head -3
+          echo "=== 对照 rt5645 ==="; find /mnt/p*/lib/modules -name "snd-soc-rt5645.ko*" 2>/dev/null | head -2
