@@ -1,0 +1,11 @@
+--- a/sound/soc/codecs/Kconfig	2026-10-28 17:01:04.777490864 +0800
++++ b/sound/soc/codecs/Kconfig	2026-10-28 17:01:04.780824094 +0800
+@@ -1767,7 +1767,7 @@
+ 	depends on I2C
+ 
+ config SND_SOC_RT5651
+-	tristate
++	tristate "Realtek RT5651 CODEC"
+ 	depends on I2C
+ 
+ config SND_SOC_RT5659
