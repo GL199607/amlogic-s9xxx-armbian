@@ -1,0 +1,52 @@
+name: Verify iotbox image (one-shot)
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: "image .img.gz url"
+        required: true
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download
+        run: |
+          set -e
+          curl -sSL --retry 5 --retry-all-errors -o img.gz "${{ inputs.image_url }}"
+          ls -l img.gz; sha256sum img.gz
+          gunzip -k img.gz
+          IMG=$(ls *.img | head -1); echo "IMG=$IMG"; ls -l $IMG
+      - name: Bootloader segments
+        run: |
+          IMG=$(ls *.img | head -1)
+          echo "=== 0x8000 (idbloader) ==="; dd if=$IMG bs=1 skip=32768 count=16 2>/dev/null | xxd
+          echo "=== 0xC00000 (trust, LBA0x6000) ==="; dd if=$IMG bs=1 skip=12582912 count=16 2>/dev/null | xxd
+          echo "=== 0x800000 (uboot) ==="; dd if=$IMG bs=1 skip=8388608 count=16 2>/dev/null | xxd
+      - name: Mount and inspect
+        run: |
+          IMG=$(ls *.img | head -1)
+          sudo losetup -Pf --show $IMG
+          lsblk -f
+          BOOT=$(lsblk -lno NAME,LABEL | awk '$2=="boot"{print "/dev/"$1}' | head -1)
+          ROOT=$(lsblk -lno NAME,LABEL | awk '$2=="rootfs"{print "/dev/"$1}' | head -1)
+          echo "BOOT=$BOOT ROOT=$ROOT"
+          sudo mkdir -p /mnt/b /mnt/r
+          sudo mount $BOOT /mnt/b || sudo mount -o ro $BOOT /mnt/b
+          echo "=== boot 分区内容 ==="; ls /mnt/b; ls /mnt/b/dtb/rockchip 2>/dev/null | grep -i iotbox || true
+          echo "=== dtb md5（期望 49c71e1bdd1bb87a923d686b196080f8）==="
+          md5sum /mnt/b/dtb/rockchip/rk3399-iotbox3399m.dtb 2>/dev/null || echo "DTB_NOT_FOUND"
+          echo "=== boot.scr / boot.cmd load_addr ==="
+          for f in /mnt/b/boot.scr /mnt/b/boot.cmd; do
+            [ -f $f ] && { echo "--- $f ---"; strings $f | grep -E "load_addr|booti" | head -5; }
+          done
+          echo "=== armbianEnv fdtfile ==="; grep -E "fdtfile|rootdev" /mnt/b/armbianEnv.txt 2>/dev/null || true
+          sudo mount $ROOT /mnt/r || sudo mount -o ro $ROOT /mnt/r
+          echo "=== 内核版本目录 ==="; ls /mnt/r/lib/modules/ 2>/dev/null
+          echo "=== RT5651 模块（关键判据）==="
+          find /mnt/r/lib/modules -name "*rt5651*" -o -name "snd-soc-rt5651.ko*" 2>/dev/null | head
+          echo "=== modules.alias 里 realtek,rt5651 ==="
+          grep -r "realtek,rt5651" /mnt/r/lib/modules/*/modules.alias 2>/dev/null | head -4
+          echo "=== modules.builtin 里是否内建 ==="
+          grep -i rt5651 /mnt/r/lib/modules/*/modules.builtin 2>/dev/null | head -3
+          echo "=== 对照：rt5645 ==="
+          find /mnt/r/lib/modules -name "snd-soc-rt5645.ko*" 2>/dev/null | head -2
